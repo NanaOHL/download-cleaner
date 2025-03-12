@@ -12,7 +12,7 @@ const config = {
     ignorePatterns: ['.DS_Store', 'Thumbs.db', '.*.swp'],
     folders: {
         documents: ['.txt', '.pdf', '.doc', '.docx', '.rtf', '.pages', '.odt'],
-        images: ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.heic', '.raw'],
+        images: ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.heic', '.raw', '.avif'],
         videos: ['.mp4', '.mov', '.avi', '.mkv', '.wmv', '.flv'],
         audio: ['.mp3', '.wav', '.aac', '.flac', '.m4a'],
         archives: ['.zip', '.rar', '.7z', '.tar', '.gz'],
