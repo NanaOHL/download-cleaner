@@ -4,24 +4,31 @@ const path = require('path');
 const chokidar = require('chokidar');
 const os = require('os');
 const winston = require('winston');
+const Anthropic = require('@anthropic-ai/sdk').default;
+const pdfParse = require('pdf-parse');
+const { execFile } = require('child_process');
+const { promisify } = require('util');
+const execFileAsync = promisify(execFile);
 
 // Configuration
 const config = {
     homeDirectory: os.homedir(),
-    archiveDays: 90,
+    archiveDays: 365,
     ignorePatterns: ['.DS_Store', 'Thumbs.db', '.*.swp'],
     folders: {
-        documents: ['.txt', '.pdf', '.doc', '.docx', '.rtf', '.pages', '.odt'],
-        images: ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.heic', '.raw', '.avif'],
-        videos: ['.mp4', '.mov', '.avi', '.mkv', '.wmv', '.flv'],
-        audio: ['.mp3', '.wav', '.aac', '.flac', '.m4a'],
-        archives: ['.zip', '.rar', '.7z', '.tar', '.gz'],
-        applications: ['.exe', '.dmg', '.pkg', '.deb', '.appimage', '.msi'],
-        code: ['.js','.tsx', '.py', '.java', '.cpp', '.h', '.css', '.html', '.php', '.rb'],
-        data: ['.csv', '.xls', '.xlsx', '.json', '.xml', '.yaml'],
-        databases: ['.sql', '.db', '.sqlite', '.sqlite3'],
-        design: ['.ai', '.psd', '.sketch', '.fig', '.xd'],
-        presentations: ['.ppt', '.pptx', '.key']
+        documents: ['.txt', '.pdf', '.doc', '.docx', '.rtf', '.pages', '.odt', '.md', '.epub', '.mobi', '.tex', '.wpd', '.wps', '.xps'],
+        images: ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.heic', '.raw', '.bmp', '.tiff', '.tif', '.ico', '.avif', '.cr2', '.nef', '.arw', '.dng'],
+        videos: ['.mp4', '.mov', '.avi', '.mkv', '.wmv', '.flv', '.webm', '.m4v', '.3gp', '.ogv', '.vob', '.ts', '.mts'],
+        audio: ['.mp3', '.wav', '.aac', '.flac', '.m4a', '.ogg', '.opus', '.wma', '.aiff', '.mid', '.midi', '.amr'],
+        archives: ['.zip', '.rar', '.7z', '.tar', '.gz', '.bz2', '.xz', '.tgz', '.tar.gz', '.tar.bz2', '.cab', '.iso'],
+        applications: ['.exe', '.dmg', '.pkg', '.deb', '.appimage', '.msi', '.apk', '.ipa', '.snap', '.flatpak', '.rpm'],
+        code: ['.js', '.tsx', '.ts', '.jsx', '.py', '.java', '.cpp', '.c', '.h', '.cs', '.css', '.html', '.php', '.rb', '.go', '.rs', '.swift', '.kt', '.sh', '.bash', '.zsh', '.ps1', '.lua', '.r', '.m', '.vue', '.svelte'],
+        data: ['.csv', '.numbers', '.xls', '.xlsx', '.json', '.xml', '.yaml', '.yml', '.toml', '.ini', '.tsv', '.parquet', '.geojson'],
+        databases: ['.sql', '.db', '.sqlite', '.sqlite3', '.mdb', '.accdb'],
+        design: ['.ai', '.psd', '.sketch', '.fig', '.xd', '.eps', '.indd', '.afdesign', '.afphoto', '.cdr', '.xcf'],
+        presentations: ['.ppt', '.pptx', '.key', '.odp'],
+        fonts: ['.ttf', '.otf', '.woff', '.woff2', '.eot'],
+        ebooks: ['.epub', '.mobi', '.azw', '.azw3', '.lit', '.lrf']
     }
 };
 
@@ -50,6 +57,142 @@ class DownloadsOrganizer {
         this.archiveFolder = path.join(this.downloadFolder, '_Archive');
         this.extensionMap = this.buildExtensionMap();
         this.knownFiles = new Set(); // Track files we've already processed
+        this.anthropic = process.env.ANTHROPIC_API_KEY
+            ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+            : null;
+    }
+
+    async generateSmartFileName(filePath) {
+        const ext = path.extname(filePath).toLowerCase();
+        const today = new Date().toISOString().slice(0, 10);
+
+        if (!this.anthropic) {
+            logger.warn('ANTHROPIC_API_KEY not set — skipping smart rename');
+            return null;
+        }
+
+        try {
+            const imageExts = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.tiff', '.tif', '.heic', '.avif']);
+            const pdfExt = ext === '.pdf';
+            const textExts = new Set(['.txt', '.md', '.csv', '.json', '.xml', '.yaml', '.yml', '.html', '.rtf']);
+
+            let messages;
+
+            if (pdfExt) {
+                const buffer = fsSync.readFileSync(filePath);
+                const data = await pdfParse(buffer, { max: 3 }); // first 3 pages
+                const snippet = data.text.slice(0, 3000).trim();
+                if (!snippet) return null;
+
+                messages = [{
+                    role: 'user',
+                    content: `Based on this document content, generate a short descriptive filename (no extension, no path).
+
+Rules:
+- Use lowercase letters, numbers, and underscores only
+- Format depends on document type:
+  - Invoice: invoice_<company>_<inv_number>_<amount>_<date>
+  - Receipt: receipt_<merchant>_<ref_number>_<amount>_<date>
+  - Purchase Order: po_<company>_<po_number>_<date>
+  - Contract/Agreement: contract_<parties>_<ref_number>_<date>
+  - Statement: statement_<bank_or_company>_<ref_number>_<date>
+  - Report: report_<topic>_<ref_number>_<date>
+  - Article/Paper: article_<title_slug>
+  - Resume/CV: resume_<name>
+  - Other: <type>_<description>_<ref_number>_<date>
+- For <inv_number>/<ref_number>/<po_number>: extract invoice numbers (e.g. INV-1234), reference numbers, PO numbers, order numbers, case numbers, or any unique document identifier — omit if none found
+- Replace spaces with underscores
+- Keep it under 60 characters
+- Use today's date (${today}) if no date found in document
+- Return ONLY the filename, nothing else
+
+Document content:
+${snippet}`
+                }];
+
+            } else if (imageExts.has(ext)) {
+                const mediaTypeMap = {
+                    '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
+                    '.gif': 'image/gif', '.webp': 'image/webp'
+                };
+                const mediaType = mediaTypeMap[ext];
+                if (!mediaType) return null; // heic/avif not supported by API vision
+
+                const imageData = fsSync.readFileSync(filePath).toString('base64');
+
+                messages = [{
+                    role: 'user',
+                    content: [
+                        {
+                            type: 'image',
+                            source: { type: 'base64', media_type: mediaType, data: imageData }
+                        },
+                        {
+                            type: 'text',
+                            text: `Generate a short descriptive filename for this image (no extension, no path).
+
+Rules:
+- Use lowercase letters, numbers, and underscores only
+- Format: <type>_<description> e.g. screenshot_dashboard_overview, photo_golden_gate_bridge, receipt_starbucks_coffee
+- Keep it under 60 characters
+- Return ONLY the filename, nothing else`
+                        }
+                    ]
+                }];
+
+            } else if (textExts.has(ext)) {
+                const content = await fs.readFile(filePath, 'utf8');
+                const snippet = content.slice(0, 3000).trim();
+                if (!snippet) return null;
+
+                messages = [{
+                    role: 'user',
+                    content: `Based on this file content, generate a short descriptive filename (no extension, no path).
+
+Rules:
+- Use lowercase letters, numbers, and underscores only
+- Include any invoice numbers, reference numbers, order numbers, or unique document identifiers found in the content
+- Keep it under 60 characters
+- Return ONLY the filename, nothing else
+
+Content:
+${snippet}`
+                }];
+
+            } else {
+                return null; // unsupported type — keep original name
+            }
+
+            const response = await this.anthropic.messages.create({
+                model: 'claude-opus-4-6',
+                max_tokens: 64,
+                messages
+            });
+
+            const suggested = response.content[0]?.text?.trim()
+                .replace(/[^a-z0-9_\-]/gi, '_')
+                .replace(/_+/g, '_')
+                .replace(/^_|_$/g, '')
+                .toLowerCase();
+
+            return suggested || null;
+
+        } catch (err) {
+            logger.warn(`Smart rename failed for ${filePath}: ${err.message}`);
+            return null;
+        }
+    }
+
+    async setArchiveTag(filePath) {
+        try {
+            // Build binary plist ["archive"] using Python, write via xattr -wx
+            const plistScript = `import plistlib, sys; sys.stdout.buffer.write(plistlib.dumps(['archive']))`;
+            const { stdout } = await execFileAsync('python3', ['-c', plistScript], { encoding: 'buffer' });
+            await execFileAsync('xattr', ['-wx', 'com.apple.metadata:_kMDItemUserTags', stdout.toString('hex'), filePath]);
+            logger.info(`Archive tag set: ${path.basename(filePath)}`);
+        } catch (err) {
+            logger.warn(`Failed to set archive tag on ${path.basename(filePath)}: ${err.message}`);
+        }
     }
 
     buildExtensionMap() {
@@ -106,11 +249,17 @@ class DownloadsOrganizer {
         const watcher = chokidar.watch(this.downloadFolder, {
             depth: 0, // Only watch the immediate directory
             ignored: (filePath) => {
+                // Never ignore the root watch directory itself
+                if (filePath === this.downloadFolder) return false;
                 const basename = path.basename(filePath);
-                return config.ignorePatterns.some(pattern => {
-                    const regex = new RegExp(pattern);
-                    return regex.test(basename);
-                }) || !fsSync.statSync(filePath).isFile(); // Ignore directories
+                if (config.ignorePatterns.some(pattern => new RegExp(pattern).test(basename))) {
+                    return true;
+                }
+                try {
+                    return !fsSync.statSync(filePath).isFile();
+                } catch {
+                    return true; // file gone or inaccessible — ignore it
+                }
             },
             persistent: true,
             ignoreInitial: true,
@@ -144,11 +293,26 @@ class DownloadsOrganizer {
 
             const stats = await fs.stat(filePath);
             const fileAge = Date.now() - stats.mtime.getTime();
-            const shouldArchive = fileAge > config.archiveDays * 24 * 60 * 60 * 1000;
+            const isOld = fileAge > config.archiveDays * 24 * 60 * 60 * 1000;
 
-            if (shouldArchive) {
-                await this.moveFile(filePath, this.archiveFolder);
-                return;
+            // Try to generate a smart name before moving
+            const ext = path.extname(filePath).toLowerCase();
+            const smartBaseName = await this.generateSmartFileName(filePath);
+
+            if (smartBaseName) {
+                const newName = `${smartBaseName}${ext}`;
+                const newPath = path.join(this.downloadFolder, newName);
+                if (newPath !== filePath && !fsSync.existsSync(newPath)) {
+                    await fs.rename(filePath, newPath);
+                    this.knownFiles.delete(filePath);
+                    this.knownFiles.add(newPath);
+                    logger.info(`Renamed: ${path.basename(filePath)} → ${newName}`);
+                    filePath = newPath;
+                }
+            }
+
+            if (isOld) {
+                await this.setArchiveTag(filePath);
             }
 
             const extension = path.extname(filePath).toLowerCase();
@@ -217,4 +381,12 @@ organizer.initialize().catch(error => {
 process.on('SIGINT', () => {
     logger.info('Shutting down...');
     process.exit(0);
+});
+
+process.on('uncaughtException', (error) => {
+    logger.error('Uncaught exception', { error: error.message, stack: error.stack });
+});
+
+process.on('unhandledRejection', (reason) => {
+    logger.error('Unhandled rejection', { reason: String(reason) });
 });

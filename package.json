@@ -1,7 +1,9 @@
 {
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.89.0",
     "chokidar": "^3.6.0",
     "node": "^20.16.0",
+    "pdf-parse": "^1.1.4",
     "pm2": "^5.4.2",
     "winston": "^3.17.0"
   }
